@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -25,6 +26,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           components: clippy
       - run: cargo clippy --workspace -- -D warnings
 
@@ -33,4 +35,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
       - run: cargo test
