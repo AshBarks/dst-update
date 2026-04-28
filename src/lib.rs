@@ -1,0 +1,10 @@
+mod html;
+mod http;
+mod model;
+mod rss;
+mod text;
+
+pub use html::{fetch_latest_update, latest_update as latest_html_update, parse_update_html};
+pub use model::{AppError, HtmlGameUpdate, Platform, RssUpdateInfo, UpdateStatus};
+pub use rss::{RSS_URL, fetch_rss, latest_update as latest_rss_update, parse_updates};
+pub use text::clean_html;

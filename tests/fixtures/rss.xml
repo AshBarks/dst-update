@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Don't Starve Together Updates</title>
+    <link>https://forums.kleientertainment.com</link>
+    <description>Game updates for Don't Starve Together</description>
+    <item>
+      <title>Update 530002 - Test</title>
+      <link>https://forums.kleientertainment.com/game-updates/dst/530002-r1902/</link>
+      <description>&lt;p&gt;PC test update description&lt;/p&gt;</description>
+      <pubDate>Mon, 07 Nov 2022 20:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Update 530001 - Release</title>
+      <link>https://forums.kleientertainment.com/game-updates/dst/530001-r1901/</link>
+      <description>&lt;p&gt;PC release update description&lt;/p&gt;</description>
+      <pubDate>Sun, 06 Nov 2022 18:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Update 529999 - Xbox</title>
+      <link>https://forums.kleientertainment.com/game-updates/dst_xboxone/529999-r1900/</link>
+      <description>&lt;p&gt;Xbox update description&lt;/p&gt;</description>
+      <pubDate>Sat, 05 Nov 2022 16:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Update 529998 - PS4</title>
+      <link>https://forums.kleientertainment.com/game-updates/dst_ps4/529998-r1899/</link>
+      <description>&lt;p&gt;PS4 update description&lt;/p&gt;</description>
+      <pubDate>Fri, 04 Nov 2022 14:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Update 529997 - Switch</title>
+      <link>https://forums.kleientertainment.com/game-updates/dst_switch/529997-r1898/</link>
+      <description>&lt;p&gt;Switch update description&lt;/p&gt;</description>
+      <pubDate>Thu, 03 Nov 2022 12:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Update without date</title>
+      <link>https://forums.kleientertainment.com/game-updates/dst/520000-r1800/</link>
+      <description>Missing pub_date should be filtered out</description>
+    </item>
+  </channel>
+</rss>
