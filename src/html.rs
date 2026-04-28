@@ -24,12 +24,17 @@ pub fn fetch_and_parse_page(page: u32) -> Result<Vec<HtmlGameUpdate>, AppError> 
 
 pub fn parse_update_html(html: &str) -> Result<Vec<HtmlGameUpdate>, AppError> {
     let document = Html::parse_document(html);
-    let row_selector = Selector::parse("li.cCmsRecord_row").expect("CSS 选择器解析失败: li.cCmsRecord_row");
+    let row_selector =
+        Selector::parse("li.cCmsRecord_row").expect("CSS 选择器解析失败: li.cCmsRecord_row");
     let link_selector = Selector::parse("a.cRelease").expect("CSS 选择器解析失败: a.cRelease");
-    let h3_selector = Selector::parse("h3.ipsType_sectionHead").expect("CSS 选择器解析失败: h3.ipsType_sectionHead");
-    let badge_selector = Selector::parse("span.ipsBadge").expect("CSS 选择器解析失败: span.ipsBadge");
-    let meta_selector = Selector::parse("div.ipsDataItem_meta").expect("CSS 选择器解析失败: div.ipsDataItem_meta");
-    let hotfix_selector = Selector::parse("span.cUpdate_hotfix").expect("CSS 选择器解析失败: span.cUpdate_hotfix");
+    let h3_selector = Selector::parse("h3.ipsType_sectionHead")
+        .expect("CSS 选择器解析失败: h3.ipsType_sectionHead");
+    let badge_selector =
+        Selector::parse("span.ipsBadge").expect("CSS 选择器解析失败: span.ipsBadge");
+    let meta_selector =
+        Selector::parse("div.ipsDataItem_meta").expect("CSS 选择器解析失败: div.ipsDataItem_meta");
+    let hotfix_selector =
+        Selector::parse("span.cUpdate_hotfix").expect("CSS 选择器解析失败: span.cUpdate_hotfix");
 
     debug!("开始解析更新页面 HTML");
 

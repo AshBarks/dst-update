@@ -49,8 +49,8 @@ fn parse_pub_date(date_str: &str) -> Result<DateTime<FixedOffset>, ParseError> {
 pub fn fetch_rss(url: &str) -> Result<Channel, AppError> {
     debug!("获取 RSS: {}", url);
     let content = fetch(url)?;
-    let channel = Channel::read_from(content.as_bytes())
-        .map_err(|e| AppError::RssParse(e.to_string()))?;
+    let channel =
+        Channel::read_from(content.as_bytes()).map_err(|e| AppError::RssParse(e.to_string()))?;
     debug!("RSS 解析到 {} 条条目", channel.items().len());
     Ok(channel)
 }
@@ -68,7 +68,10 @@ pub fn parse_updates(channel: &Channel) -> Vec<RssUpdateInfo> {
             let pub_date = match parse_pub_date(pub_date_str) {
                 Ok(d) => d,
                 Err(e) => {
-                    warn!("跳过 RSS 条目，日期解析失败: title={:?}, pub_date={:?}, error={}", title, pub_date_str, e);
+                    warn!(
+                        "跳过 RSS 条目，日期解析失败: title={:?}, pub_date={:?}, error={}",
+                        title, pub_date_str, e
+                    );
                     return None;
                 }
             };
@@ -76,7 +79,10 @@ pub fn parse_updates(channel: &Channel) -> Vec<RssUpdateInfo> {
             let (build_number, release_id) = match extract_version(&link) {
                 Some(v) => v,
                 None => {
-                    warn!("跳过 RSS 条目，无法提取版本号: title={:?}, link={:?}", title, link);
+                    warn!(
+                        "跳过 RSS 条目，无法提取版本号: title={:?}, link={:?}",
+                        title, link
+                    );
                     return None;
                 }
             };

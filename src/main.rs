@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use log::error;
 
 use dst_update::{
-    AppError, RSS_URL, UpdateStatus, clean_html, fetch_latest_update, fetch_rss,
-    latest_rss_update, parse_updates,
+    AppError, RSS_URL, UpdateStatus, clean_html, fetch_latest_update, fetch_rss, latest_rss_update,
+    parse_updates,
 };
 
 #[derive(Parser)]
