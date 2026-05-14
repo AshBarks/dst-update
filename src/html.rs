@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
-use log::{debug, warn};
+use log::{debug, warn, info};
 use scraper::{Html, Selector};
+use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
 
@@ -215,16 +216,49 @@ pub fn fetch_and_parse_detail(update: &HtmlGameUpdate) -> Result<HtmlUpdateDetai
 
 pub fn fetch_all_update_details(
     max_pages: Option<u32>,
+    existing: Option<Vec<HtmlUpdateDetail>>,
 ) -> Result<Vec<HtmlUpdateDetail>, AppError> {
     let updates = fetch_all_updates(max_pages)?;
-    let mut details = Vec::with_capacity(updates.len());
 
-    for (i, update) in updates.iter().enumerate() {
+    let existing_map: HashMap<u32, HtmlUpdateDetail> = existing
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| !d.content_text.is_empty())
+        .map(|d| (d.release_id, d))
+        .collect();
+
+    let skipped = updates
+        .iter()
+        .filter(|u| existing_map.contains_key(&u.release_id))
+        .count();
+    let to_fetch = updates.len() - skipped;
+
+    if skipped > 0 {
+        info!(
+            "共 {} 条更新，其中 {} 条已有详情将跳过，需抓取 {} 条",
+            updates.len(),
+            skipped,
+            to_fetch
+        );
+    }
+
+    let mut details = Vec::with_capacity(updates.len());
+    let mut fetched = 0usize;
+
+    for update in &updates {
+        if let Some(existing_detail) = existing_map.get(&update.release_id) {
+            debug!(
+                "跳过已有详情: build={}, release_id={}",
+                update.build_number, update.release_id
+            );
+            details.push(existing_detail.clone());
+            continue;
+        }
+
+        fetched += 1;
         debug!(
             "获取详情 {}/{}: build={}",
-            i + 1,
-            updates.len(),
-            update.build_number
+            fetched, to_fetch, update.build_number
         );
         match fetch_and_parse_detail(update) {
             Ok(detail) => details.push(detail),
@@ -245,7 +279,7 @@ pub fn fetch_all_update_details(
             }
         }
 
-        if i < updates.len() - 1 {
+        if fetched < to_fetch {
             thread::sleep(Duration::from_secs(1));
         }
     }

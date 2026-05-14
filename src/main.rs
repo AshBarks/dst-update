@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use log::error;
 
 use dst_update::{
-    AppError, RSS_URL, UpdateExport, UpdateStatus, clean_html, fetch_all_update_details,
-    fetch_latest_update, fetch_rss, latest_rss_update, parse_updates,
+    AppError, HtmlUpdateDetail, RSS_URL, UpdateExport, UpdateStatus, clean_html,
+    fetch_all_update_details, fetch_latest_update, fetch_rss, latest_rss_update, parse_updates,
 };
 
 #[derive(Parser)]
@@ -114,7 +114,8 @@ fn run_html(args: &HtmlArgs) -> Result<(), AppError> {
 }
 
 fn run_export(args: &ExportArgs) -> Result<(), AppError> {
-    let details = fetch_all_update_details(args.max_pages)?;
+    let existing = load_existing(&args.output);
+    let details = fetch_all_update_details(args.max_pages, existing)?;
     let export = UpdateExport {
         total: details.len(),
         fetched_at: chrono::Utc::now().to_rfc3339(),
@@ -128,6 +129,12 @@ fn run_export(args: &ExportArgs) -> Result<(), AppError> {
     std::fs::write(&args.output, json).map_err(|e| AppError::Io(e.to_string()))?;
     println!("导出 {} 条更新到 {}", export.total, args.output);
     Ok(())
+}
+
+fn load_existing(path: &str) -> Option<Vec<HtmlUpdateDetail>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let export: UpdateExport = serde_json::from_str(&content).ok()?;
+    Some(export.updates)
 }
 
 fn main() {

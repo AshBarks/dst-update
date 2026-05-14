@@ -1,5 +1,5 @@
 use chrono::{DateTime, FixedOffset, NaiveDate};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::http::FetchError;
@@ -62,7 +62,7 @@ pub struct HtmlGameUpdate {
     pub release_id: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UpdateStatus {
     Test,
     Release,
@@ -79,7 +79,7 @@ impl fmt::Display for UpdateStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HtmlUpdateDetail {
     pub build_number: u32,
     pub link: String,
@@ -93,7 +93,7 @@ pub struct HtmlUpdateDetail {
     pub content_text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct UpdateExport {
     pub total: usize,
     pub fetched_at: String,
