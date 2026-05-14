@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use log::error;
+use std::time::Duration;
 
 use dst_update::{
     AppError, HtmlUpdateDetail, RSS_URL, UpdateExport, UpdateStatus, clean_html,
@@ -63,6 +64,12 @@ struct ExportArgs {
 
     #[arg(long)]
     pretty: bool,
+
+    #[arg(long, default_value_t = 5)]
+    concurrency: usize,
+
+    #[arg(long, default_value_t = 1000)]
+    interval: u64,
 }
 
 fn run_rss(args: &RssArgs) -> Result<(), AppError> {
@@ -113,9 +120,15 @@ fn run_html(args: &HtmlArgs) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_export(args: &ExportArgs) -> Result<(), AppError> {
+async fn run_export(args: &ExportArgs) -> Result<(), AppError> {
     let existing = load_existing(&args.output);
-    let details = fetch_all_update_details(args.max_pages, existing)?;
+    let details = fetch_all_update_details(
+        args.max_pages,
+        existing,
+        args.concurrency,
+        Duration::from_millis(args.interval),
+    )
+    .await?;
     let export = UpdateExport {
         total: details.len(),
         fetched_at: chrono::Utc::now().to_rfc3339(),
@@ -150,7 +163,10 @@ fn main() {
     let result = match cli.command {
         Some(Command::Rss(args)) => run_rss(&args),
         Some(Command::Html(args)) => run_html(&args),
-        Some(Command::Export(args)) => run_export(&args),
+        Some(Command::Export(args)) => {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            rt.block_on(run_export(&args))
+        }
         None => run_html(&HtmlArgs {
             build_only: cli.build_only,
             test: cli.test,

@@ -1,11 +1,11 @@
 use chrono::NaiveDate;
-use log::{debug, warn, info};
+use log::{debug, info, warn};
 use scraper::{Html, Selector};
 use std::collections::HashMap;
-use std::thread;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::http::fetch;
+use crate::http::{async_fetch, fetch};
 use crate::model::{AppError, HtmlGameUpdate, HtmlUpdateDetail, UpdateStatus};
 use crate::text::clean_html;
 
@@ -18,6 +18,12 @@ pub fn page_url(page: u32) -> String {
 pub fn fetch_page(page: u32) -> Result<String, AppError> {
     let url = page_url(page);
     let html = fetch(&url)?;
+    Ok(html)
+}
+
+pub async fn fetch_page_async(page: u32) -> Result<String, AppError> {
+    let url = page_url(page);
+    let html = async_fetch(&url).await?;
     Ok(html)
 }
 
@@ -163,6 +169,24 @@ pub fn fetch_all_updates(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, 
     Ok(all_updates)
 }
 
+pub async fn fetch_all_updates_async(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, AppError> {
+    let limit = max_pages.unwrap_or(100);
+    let mut all_updates = Vec::new();
+
+    for page in 1..=limit {
+        debug!("获取第 {} 页更新", page);
+        let html = fetch_page_async(page).await?;
+        let updates = parse_update_html(&html)?;
+        if updates.is_empty() {
+            debug!("第 {} 页无更新记录，停止翻页", page);
+            break;
+        }
+        all_updates.extend(updates);
+    }
+
+    Ok(all_updates)
+}
+
 pub fn parse_detail_html(html: &str) -> Result<(String, String), AppError> {
     let document = Html::parse_document(html);
 
@@ -214,75 +238,151 @@ pub fn fetch_and_parse_detail(update: &HtmlGameUpdate) -> Result<HtmlUpdateDetai
     })
 }
 
-pub fn fetch_all_update_details(
-    max_pages: Option<u32>,
-    existing: Option<Vec<HtmlUpdateDetail>>,
-) -> Result<Vec<HtmlUpdateDetail>, AppError> {
-    let updates = fetch_all_updates(max_pages)?;
+pub async fn fetch_and_parse_detail_async(
+    update: &HtmlGameUpdate,
+) -> Result<HtmlUpdateDetail, AppError> {
+    let html = async_fetch(&update.link).await?;
+    let (title, content_text) = parse_detail_html(&html)?;
 
+    Ok(HtmlUpdateDetail {
+        build_number: update.build_number,
+        link: update.link.clone(),
+        release_date: update.release_date,
+        is_hotfix: update.is_hotfix,
+        status: update.status,
+        is_current: update.is_current,
+        row_id: update.row_id,
+        release_id: update.release_id,
+        title,
+        content_text,
+    })
+}
+
+pub fn compute_fetch_plan(
+    updates: &[HtmlGameUpdate],
+    existing: &[HtmlUpdateDetail],
+) -> (HashMap<u32, HtmlUpdateDetail>, Vec<usize>) {
     let existing_map: HashMap<u32, HtmlUpdateDetail> = existing
-        .unwrap_or_default()
-        .into_iter()
+        .iter()
         .filter(|d| !d.content_text.is_empty())
-        .map(|d| (d.release_id, d))
+        .map(|d| (d.release_id, d.clone()))
         .collect();
 
-    let skipped = updates
+    let to_fetch: Vec<usize> = updates
         .iter()
-        .filter(|u| existing_map.contains_key(&u.release_id))
-        .count();
-    let to_fetch = updates.len() - skipped;
+        .enumerate()
+        .filter(|(_, u)| !existing_map.contains_key(&u.release_id))
+        .map(|(i, _)| i)
+        .collect();
+
+    (existing_map, to_fetch)
+}
+
+pub async fn fetch_all_update_details(
+    max_pages: Option<u32>,
+    existing: Option<Vec<HtmlUpdateDetail>>,
+    concurrency: usize,
+    interval: Duration,
+) -> Result<Vec<HtmlUpdateDetail>, AppError> {
+    let updates = Arc::new(fetch_all_updates_async(max_pages).await?);
+
+    let (existing_map, to_fetch) =
+        compute_fetch_plan(&updates, existing.unwrap_or_default().as_slice());
+
+    let skipped = updates.len() - to_fetch.len();
 
     if skipped > 0 {
         info!(
             "共 {} 条更新，其中 {} 条已有详情将跳过，需抓取 {} 条",
             updates.len(),
             skipped,
-            to_fetch
+            to_fetch.len()
         );
     }
 
-    let mut details = Vec::with_capacity(updates.len());
-    let mut fetched = 0usize;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let total_to_fetch = to_fetch.len();
+    let mut handles = Vec::with_capacity(total_to_fetch);
 
-    for update in &updates {
-        if let Some(existing_detail) = existing_map.get(&update.release_id) {
-            debug!(
-                "跳过已有详情: build={}, release_id={}",
-                update.build_number, update.release_id
-            );
-            details.push(existing_detail.clone());
-            continue;
-        }
+    for (seq, idx) in to_fetch.into_iter().enumerate() {
+        let sem = semaphore.clone();
+        let updates = updates.clone();
+        let existing_map = existing_map.clone();
 
-        fetched += 1;
-        debug!(
-            "获取详情 {}/{}: build={}",
-            fetched, to_fetch, update.build_number
-        );
-        match fetch_and_parse_detail(update) {
-            Ok(detail) => details.push(detail),
-            Err(e) => {
-                warn!("获取详情失败 build={}: {}", update.build_number, e);
-                details.push(HtmlUpdateDetail {
-                    build_number: update.build_number,
-                    link: update.link.clone(),
-                    release_date: update.release_date,
-                    is_hotfix: update.is_hotfix,
-                    status: update.status,
-                    is_current: update.is_current,
-                    row_id: update.row_id,
-                    release_id: update.release_id,
-                    title: String::new(),
-                    content_text: String::new(),
-                });
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+
+            if seq > 0 {
+                tokio::time::sleep(interval).await;
             }
-        }
 
-        if fetched < to_fetch {
-            thread::sleep(Duration::from_secs(1));
-        }
+            let update = &updates[idx];
+            debug!(
+                "获取详情 {}/{}: build={}",
+                seq + 1,
+                total_to_fetch,
+                update.build_number
+            );
+
+            match fetch_and_parse_detail_async(update).await {
+                Ok(detail) => (update.release_id, Ok(detail)),
+                Err(e) => {
+                    warn!("获取详情失败 build={}: {}", update.build_number, e);
+                    let detail = existing_map
+                        .get(&update.release_id)
+                        .cloned()
+                        .unwrap_or(HtmlUpdateDetail {
+                            build_number: update.build_number,
+                            link: update.link.clone(),
+                            release_date: update.release_date,
+                            is_hotfix: update.is_hotfix,
+                            status: update.status,
+                            is_current: update.is_current,
+                            row_id: update.row_id,
+                            release_id: update.release_id,
+                            title: String::new(),
+                            content_text: String::new(),
+                        });
+                    (update.release_id, Err(detail))
+                }
+            }
+        }));
     }
+
+    let mut results: Vec<(u32, Result<HtmlUpdateDetail, HtmlUpdateDetail>)> = Vec::new();
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+    let fetched_map: HashMap<u32, HtmlUpdateDetail> = results
+        .into_iter()
+        .map(|(rid, r)| (rid, r.unwrap_or_else(|e| e)))
+        .collect();
+
+    let details: Vec<HtmlUpdateDetail> = updates
+        .iter()
+        .map(|u| {
+            fetched_map
+                .get(&u.release_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    existing_map
+                        .get(&u.release_id)
+                        .cloned()
+                        .unwrap_or(HtmlUpdateDetail {
+                            build_number: u.build_number,
+                            link: u.link.clone(),
+                            release_date: u.release_date,
+                            is_hotfix: u.is_hotfix,
+                            status: u.status,
+                            is_current: u.is_current,
+                            row_id: u.row_id,
+                            release_id: u.release_id,
+                            title: String::new(),
+                            content_text: String::new(),
+                        })
+                })
+        })
+        .collect();
 
     Ok(details)
 }
@@ -428,5 +528,163 @@ mod tests {
             page_url(3),
             "https://forums.kleientertainment.com/game-updates/dst/page/3/"
         );
+    }
+
+    #[test]
+    fn test_parse_detail_html_normal() {
+        let html = std::fs::read_to_string("tests/fixtures/detail.html")
+            .expect("Failed to read detail.html");
+        let (title, content) = parse_detail_html(&html).expect("Failed to parse detail HTML");
+
+        assert_eq!(title, "529998 - Test Update");
+        assert!(!content.starts_with("Update Information:\n"), "Should strip prefix");
+        assert!(content.contains("Fixed a crash when saving"));
+        assert!(content.contains("Added new feature XYZ"));
+        assert!(content.contains("See the full notes for details."));
+    }
+
+    #[test]
+    fn test_parse_detail_html_no_prefix() {
+        let html = std::fs::read_to_string("tests/fixtures/detail_no_prefix.html")
+            .expect("Failed to read detail_no_prefix.html");
+        let (title, content) = parse_detail_html(&html).expect("Failed to parse detail HTML");
+
+        assert_eq!(title, "530002 - Release Update");
+        assert!(content.contains("Bug fixes for the release version."));
+        assert!(content.contains("No prefix here."));
+    }
+
+    #[test]
+    fn test_parse_detail_html_empty_content() {
+        let html = std::fs::read_to_string("tests/fixtures/detail_empty.html")
+            .expect("Failed to read detail_empty.html");
+        let result = parse_detail_html(&html);
+        assert!(result.is_err(), "Should return error for empty content");
+    }
+
+    #[test]
+    fn test_parse_detail_html_strips_update_information_prefix() {
+        let html = r#"<html><body>
+            <h1 class="ipsType_pageTitle">Test Title</h1>
+            <section class="ipsType_richText">
+                <h2>Update Information:</h2>
+                <p>Hello world</p>
+            </section>
+        </body></html>"#;
+        let (_, content) = parse_detail_html(html).unwrap();
+        assert!(content.starts_with("Hello world"), "Content should start after prefix, got: {:?}", content);
+    }
+
+    #[test]
+    fn test_parse_detail_html_inline_h2_no_strip() {
+        let html = r#"<html><body>
+            <h1 class="ipsType_pageTitle">Test Title</h1>
+            <section class="ipsType_richText"><h2>Update Information:</h2><p>Hello world</p></section>
+        </body></html>"#;
+        let (_, content) = parse_detail_html(html).unwrap();
+        assert!(
+            content.contains("Hello world"),
+            "Content should contain body text, got: {:?}",
+            content
+        );
+        assert!(
+            content.contains("Update Information:"),
+            "Inline h2 without newline prevents prefix stripping, got: {:?}",
+            content
+        );
+    }
+
+    fn make_detail(release_id: u32, content_text: &str) -> HtmlUpdateDetail {
+        HtmlUpdateDetail {
+            build_number: 500000 + release_id,
+            link: format!("https://example.com/{}", release_id),
+            release_date: chrono::Utc::now().date_naive(),
+            is_hotfix: false,
+            status: UpdateStatus::Release,
+            is_current: false,
+            row_id: release_id,
+            release_id,
+            title: format!("Update {}", release_id),
+            content_text: content_text.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_compute_fetch_plan_all_new() {
+        let updates = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Test),
+        ];
+        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &[]);
+        assert!(existing_map.is_empty());
+        assert_eq!(to_fetch, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_compute_fetch_plan_skip_existing_with_content() {
+        let updates = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Test),
+            make_update(300, 3, UpdateStatus::Release),
+        ];
+        let existing = vec![
+            make_detail(1, "some content"),
+            make_detail(3, "other content"),
+        ];
+        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
+        assert_eq!(existing_map.len(), 2);
+        assert!(existing_map.contains_key(&1));
+        assert!(existing_map.contains_key(&3));
+        assert_eq!(to_fetch, vec![1]);
+    }
+
+    #[test]
+    fn test_compute_fetch_plan_empty_content_not_skipped() {
+        let updates = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Test),
+        ];
+        let existing = vec![make_detail(1, "")];
+        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
+        assert!(
+            existing_map.is_empty(),
+            "Empty content_text should not be in existing_map"
+        );
+        assert_eq!(to_fetch, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_compute_fetch_plan_partial_empty_content() {
+        let updates = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Test),
+            make_update(300, 3, UpdateStatus::Release),
+        ];
+        let existing = vec![
+            make_detail(1, "valid content"),
+            make_detail(2, ""),
+        ];
+        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
+        assert_eq!(existing_map.len(), 1);
+        assert!(existing_map.contains_key(&1));
+        assert_eq!(to_fetch, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_compute_fetch_plan_no_updates() {
+        let updates: Vec<HtmlGameUpdate> = vec![];
+        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &[]);
+        assert!(existing_map.is_empty());
+        assert!(to_fetch.is_empty());
+    }
+
+    #[test]
+    fn test_compute_fetch_plan_existing_not_in_updates() {
+        let updates = vec![make_update(100, 1, UpdateStatus::Release)];
+        let existing = vec![make_detail(99, "orphan content")];
+        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
+        assert_eq!(existing_map.len(), 1);
+        assert!(existing_map.contains_key(&99));
+        assert_eq!(to_fetch, vec![0]);
     }
 }

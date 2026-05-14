@@ -83,3 +83,52 @@ pub fn fetch_with_config(url: &str, config: &HttpConfig) -> Result<String, Fetch
 
     Err(FetchError::MaxRetriesExceeded)
 }
+
+pub async fn async_fetch(url: &str) -> Result<String, FetchError> {
+    async_fetch_with_config(url, &HttpConfig::default()).await
+}
+
+pub async fn async_fetch_with_config(
+    url: &str,
+    config: &HttpConfig,
+) -> Result<String, FetchError> {
+    let client = reqwest::Client::builder()
+        .timeout(config.timeout)
+        .build()
+        .map_err(|e| FetchError::NetworkError(e.to_string()))?;
+
+    let mut delay = config.initial_delay;
+
+    for attempt in 0..=config.max_retries {
+        match client.get(url).send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return response
+                        .text()
+                        .await
+                        .map_err(|e| FetchError::HttpError(e.to_string()));
+                } else if status.is_server_error() {
+                    if attempt < config.max_retries {
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(config.max_delay);
+                        continue;
+                    }
+                    return Err(FetchError::HttpError(format!("Server error: {}", status)));
+                } else {
+                    return Err(FetchError::HttpError(format!("Client error: {}", status)));
+                }
+            }
+            Err(e) => {
+                if attempt < config.max_retries {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(config.max_delay);
+                    continue;
+                }
+                return Err(FetchError::NetworkError(e.to_string()));
+            }
+        }
+    }
+
+    Err(FetchError::MaxRetriesExceeded)
+}
