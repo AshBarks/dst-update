@@ -1,4 +1,5 @@
 use chrono::{DateTime, FixedOffset, NaiveDate};
+use serde::Serialize;
 use std::fmt;
 
 use crate::http::FetchError;
@@ -11,6 +12,8 @@ pub enum AppError {
     RssParse(String),
     #[error("HTML 解析失败: {0}")]
     HtmlParse(String),
+    #[error("IO 错误: {0}")]
+    Io(String),
     #[error("没有找到更新信息")]
     NoUpdateFound,
 }
@@ -47,7 +50,7 @@ impl fmt::Display for Platform {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HtmlGameUpdate {
     pub build_number: u32,
     pub link: String,
@@ -59,7 +62,7 @@ pub struct HtmlGameUpdate {
     pub release_id: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum UpdateStatus {
     Test,
     Release,
@@ -74,6 +77,27 @@ impl fmt::Display for UpdateStatus {
             UpdateStatus::Unknown => write!(f, "Unknown"),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HtmlUpdateDetail {
+    pub build_number: u32,
+    pub link: String,
+    pub release_date: NaiveDate,
+    pub is_hotfix: bool,
+    pub status: UpdateStatus,
+    pub is_current: bool,
+    pub row_id: u32,
+    pub release_id: u32,
+    pub title: String,
+    pub content_text: String,
+}
+
+#[derive(Serialize)]
+pub struct UpdateExport {
+    pub total: usize,
+    pub fetched_at: String,
+    pub updates: Vec<HtmlUpdateDetail>,
 }
 
 #[cfg(test)]

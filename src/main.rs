@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use log::error;
 
 use dst_update::{
-    AppError, RSS_URL, UpdateStatus, clean_html, fetch_latest_update, fetch_rss, latest_rss_update,
-    parse_updates,
+    AppError, RSS_URL, UpdateExport, UpdateStatus, clean_html, fetch_all_update_details,
+    fetch_latest_update, fetch_rss, latest_rss_update, parse_updates,
 };
 
 #[derive(Parser)]
@@ -29,6 +29,7 @@ struct Cli {
 enum Command {
     Rss(RssArgs),
     Html(HtmlArgs),
+    Export(ExportArgs),
 }
 
 #[derive(clap::Args)]
@@ -50,6 +51,18 @@ struct HtmlArgs {
 
     #[arg(long, conflicts_with = "test")]
     release: bool,
+}
+
+#[derive(clap::Args)]
+struct ExportArgs {
+    #[arg(long, default_value = "dst_updates.json")]
+    output: String,
+
+    #[arg(long)]
+    max_pages: Option<u32>,
+
+    #[arg(long)]
+    pretty: bool,
 }
 
 fn run_rss(args: &RssArgs) -> Result<(), AppError> {
@@ -100,6 +113,23 @@ fn run_html(args: &HtmlArgs) -> Result<(), AppError> {
     Ok(())
 }
 
+fn run_export(args: &ExportArgs) -> Result<(), AppError> {
+    let details = fetch_all_update_details(args.max_pages)?;
+    let export = UpdateExport {
+        total: details.len(),
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        updates: details,
+    };
+    let json = if args.pretty {
+        serde_json::to_string_pretty(&export).unwrap()
+    } else {
+        serde_json::to_string(&export).unwrap()
+    };
+    std::fs::write(&args.output, json).map_err(|e| AppError::Io(e.to_string()))?;
+    println!("导出 {} 条更新到 {}", export.total, args.output);
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -113,6 +143,7 @@ fn main() {
     let result = match cli.command {
         Some(Command::Rss(args)) => run_rss(&args),
         Some(Command::Html(args)) => run_html(&args),
+        Some(Command::Export(args)) => run_export(&args),
         None => run_html(&HtmlArgs {
             build_only: cli.build_only,
             test: cli.test,

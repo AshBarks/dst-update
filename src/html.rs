@@ -1,9 +1,12 @@
 use chrono::NaiveDate;
 use log::{debug, warn};
 use scraper::{Html, Selector};
+use std::thread;
+use std::time::Duration;
 
 use crate::http::fetch;
-use crate::model::{AppError, HtmlGameUpdate, UpdateStatus};
+use crate::model::{AppError, HtmlGameUpdate, HtmlUpdateDetail, UpdateStatus};
+use crate::text::clean_html;
 
 pub const BASE_URL: &str = "https://forums.kleientertainment.com/game-updates/dst";
 
@@ -140,6 +143,114 @@ pub fn latest_update(
             Some(UpdateStatus::Unknown) => true,
         })
         .max_by_key(|u| u.release_id)
+}
+
+pub fn fetch_all_updates(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, AppError> {
+    let limit = max_pages.unwrap_or(100);
+    let mut all_updates = Vec::new();
+
+    for page in 1..=limit {
+        debug!("获取第 {} 页更新", page);
+        let updates = fetch_and_parse_page(page)?;
+        if updates.is_empty() {
+            debug!("第 {} 页无更新记录，停止翻页", page);
+            break;
+        }
+        all_updates.extend(updates);
+    }
+
+    Ok(all_updates)
+}
+
+pub fn parse_detail_html(html: &str) -> Result<(String, String), AppError> {
+    let document = Html::parse_document(html);
+
+    let title_selector =
+        Selector::parse("h1.ipsType_pageTitle").expect("CSS selector parse failed");
+    let title = document
+        .select(&title_selector)
+        .next()
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .unwrap_or_default();
+
+    let content_selector =
+        Selector::parse("section.ipsType_richText").expect("CSS selector parse failed");
+    let content_text = document
+        .select(&content_selector)
+        .next()
+        .map(|el| clean_html(&el.html()))
+        .unwrap_or_default();
+
+    let content_text = content_text
+        .strip_prefix("Update Information:\n")
+        .unwrap_or(&content_text)
+        .to_string();
+
+    if content_text.is_empty() {
+        return Err(AppError::HtmlParse(
+            "详情页内容为空或选择器不匹配".to_string(),
+        ));
+    }
+
+    Ok((title, content_text))
+}
+
+pub fn fetch_and_parse_detail(update: &HtmlGameUpdate) -> Result<HtmlUpdateDetail, AppError> {
+    let html = fetch(&update.link)?;
+    let (title, content_text) = parse_detail_html(&html)?;
+
+    Ok(HtmlUpdateDetail {
+        build_number: update.build_number,
+        link: update.link.clone(),
+        release_date: update.release_date,
+        is_hotfix: update.is_hotfix,
+        status: update.status,
+        is_current: update.is_current,
+        row_id: update.row_id,
+        release_id: update.release_id,
+        title,
+        content_text,
+    })
+}
+
+pub fn fetch_all_update_details(
+    max_pages: Option<u32>,
+) -> Result<Vec<HtmlUpdateDetail>, AppError> {
+    let updates = fetch_all_updates(max_pages)?;
+    let mut details = Vec::with_capacity(updates.len());
+
+    for (i, update) in updates.iter().enumerate() {
+        debug!(
+            "获取详情 {}/{}: build={}",
+            i + 1,
+            updates.len(),
+            update.build_number
+        );
+        match fetch_and_parse_detail(update) {
+            Ok(detail) => details.push(detail),
+            Err(e) => {
+                warn!("获取详情失败 build={}: {}", update.build_number, e);
+                details.push(HtmlUpdateDetail {
+                    build_number: update.build_number,
+                    link: update.link.clone(),
+                    release_date: update.release_date,
+                    is_hotfix: update.is_hotfix,
+                    status: update.status,
+                    is_current: update.is_current,
+                    row_id: update.row_id,
+                    release_id: update.release_id,
+                    title: String::new(),
+                    content_text: String::new(),
+                });
+            }
+        }
+
+        if i < updates.len() - 1 {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    Ok(details)
 }
 
 pub fn fetch_latest_update(
