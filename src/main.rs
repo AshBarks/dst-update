@@ -3,8 +3,9 @@ use log::error;
 use std::time::Duration;
 
 use dst_update::{
-    AppError, HtmlUpdateDetail, RSS_URL, UpdateExport, UpdateStatus, clean_html,
-    fetch_all_update_details, fetch_latest_update, fetch_rss, latest_rss_update, parse_updates,
+    AppError, ExportOptions, HtmlUpdateDetail, RSS_URL, UpdateExport, UpdateStatus, clean_html,
+    dedup_details, fetch_all_update_details, fetch_latest_update, fetch_rss, latest_rss_update,
+    parse_updates,
 };
 
 #[derive(Parser)]
@@ -70,6 +71,9 @@ struct ExportArgs {
 
     #[arg(long, default_value_t = 1000)]
     interval: u64,
+
+    #[arg(long)]
+    full: bool,
 }
 
 fn run_rss(args: &RssArgs) -> Result<(), AppError> {
@@ -122,13 +126,13 @@ fn run_html(args: &HtmlArgs) -> Result<(), AppError> {
 
 async fn run_export(args: &ExportArgs) -> Result<(), AppError> {
     let existing = load_existing(&args.output);
-    let details = fetch_all_update_details(
-        args.max_pages,
-        existing,
-        args.concurrency,
-        Duration::from_millis(args.interval),
-    )
-    .await?;
+    let opts = ExportOptions {
+        max_pages: args.max_pages,
+        concurrency: args.concurrency,
+        interval: Duration::from_millis(args.interval),
+        full: args.full,
+    };
+    let details = fetch_all_update_details(existing, &opts).await?;
     let export = UpdateExport {
         total: details.len(),
         fetched_at: chrono::Utc::now().to_rfc3339(),
@@ -147,7 +151,7 @@ async fn run_export(args: &ExportArgs) -> Result<(), AppError> {
 fn load_existing(path: &str) -> Option<Vec<HtmlUpdateDetail>> {
     let content = std::fs::read_to_string(path).ok()?;
     let export: UpdateExport = serde_json::from_str(&content).ok()?;
-    Some(export.updates)
+    Some(dedup_details(export.updates))
 }
 
 fn main() {

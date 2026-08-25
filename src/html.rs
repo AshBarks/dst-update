@@ -152,21 +152,30 @@ pub fn latest_update(
         .max_by_key(|u| u.release_id)
 }
 
-/// 吸收一页解析结果：空页或整页均为已见条目时返回 false（应停止翻页）；
+/// 吸收一页解析结果：空页或整页均为已见/已知条目时返回 false（应停止翻页）；
 /// 否则将其中未见的条目追加到 `all` 并登记到 `seen`，返回 true。
+/// `known` 是导出文件中有效条目的增量水位线：命中会触发停止，但不影响吸收。
 fn absorb_page(
     seen: &mut HashSet<u32>,
+    known: &HashSet<u32>,
     all: &mut Vec<HtmlGameUpdate>,
     updates: Vec<HtmlGameUpdate>,
 ) -> bool {
-    if updates.is_empty() || updates.iter().all(|u| seen.contains(&u.release_id)) {
+    if updates.is_empty()
+        || updates
+            .iter()
+            .all(|u| seen.contains(&u.release_id) || known.contains(&u.release_id))
+    {
         return false;
     }
     all.extend(updates.into_iter().filter(|u| seen.insert(u.release_id)));
     true
 }
 
-pub fn fetch_all_updates(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, AppError> {
+pub fn fetch_all_updates(
+    max_pages: Option<u32>,
+    known: &HashSet<u32>,
+) -> Result<Vec<HtmlGameUpdate>, AppError> {
     let limit = max_pages.unwrap_or(100);
     let mut all_updates = Vec::new();
     let mut seen = HashSet::new();
@@ -174,7 +183,7 @@ pub fn fetch_all_updates(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, 
     for page in 1..=limit {
         debug!("获取第 {} 页更新", page);
         let updates = fetch_and_parse_page(page)?;
-        if !absorb_page(&mut seen, &mut all_updates, updates) {
+        if !absorb_page(&mut seen, known, &mut all_updates, updates) {
             debug!("第 {} 页无新增条目，停止翻页", page);
             break;
         }
@@ -185,6 +194,7 @@ pub fn fetch_all_updates(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, 
 
 pub async fn fetch_all_updates_async(
     max_pages: Option<u32>,
+    known: &HashSet<u32>,
 ) -> Result<Vec<HtmlGameUpdate>, AppError> {
     let limit = max_pages.unwrap_or(100);
     let mut all_updates = Vec::new();
@@ -194,7 +204,7 @@ pub async fn fetch_all_updates_async(
         debug!("获取第 {} 页更新", page);
         let html = fetch_page_async(page).await?;
         let updates = parse_update_html(&html)?;
-        if !absorb_page(&mut seen, &mut all_updates, updates) {
+        if !absorb_page(&mut seen, known, &mut all_updates, updates) {
             debug!("第 {} 页无新增条目，停止翻页", page);
             break;
         }
@@ -274,56 +284,153 @@ pub async fn fetch_and_parse_detail_async(
     })
 }
 
-pub fn compute_fetch_plan(
-    updates: &[HtmlGameUpdate],
-    existing: &[HtmlUpdateDetail],
-) -> (HashMap<u32, HtmlUpdateDetail>, Vec<usize>) {
-    let existing_map: HashMap<u32, HtmlUpdateDetail> = existing
+fn valid_existing(existing: &[HtmlUpdateDetail]) -> HashMap<u32, HtmlUpdateDetail> {
+    existing
         .iter()
         .filter(|d| !d.content_text.is_empty())
         .map(|d| (d.release_id, d.clone()))
+        .collect()
+}
+
+pub fn dedup_details(details: Vec<HtmlUpdateDetail>) -> Vec<HtmlUpdateDetail> {
+    let mut seen = HashSet::new();
+    details
+        .into_iter()
+        .filter(|d| seen.insert(d.release_id))
+        .collect()
+}
+
+fn placeholder_detail(update: &HtmlGameUpdate) -> HtmlUpdateDetail {
+    HtmlUpdateDetail {
+        build_number: update.build_number,
+        link: update.link.clone(),
+        release_date: update.release_date,
+        is_hotfix: update.is_hotfix,
+        status: update.status,
+        is_current: update.is_current,
+        row_id: update.row_id,
+        release_id: update.release_id,
+        title: String::new(),
+        content_text: String::new(),
+    }
+}
+
+fn pending_refetch(
+    existing: &[HtmlUpdateDetail],
+    crawled_ids: &HashSet<u32>,
+) -> Vec<HtmlGameUpdate> {
+    existing
+        .iter()
+        .filter(|d| {
+            d.content_text.is_empty() && !crawled_ids.contains(&d.release_id) && !d.link.is_empty()
+        })
+        .map(|d| HtmlGameUpdate {
+            build_number: d.build_number,
+            link: d.link.clone(),
+            release_date: d.release_date,
+            is_hotfix: d.is_hotfix,
+            status: d.status,
+            is_current: d.is_current,
+            row_id: d.row_id,
+            release_id: d.release_id,
+        })
+        .collect()
+}
+
+fn merge_details(
+    crawled: &[HtmlGameUpdate],
+    fetched: &HashMap<u32, HtmlUpdateDetail>,
+    existing_map: &HashMap<u32, HtmlUpdateDetail>,
+    existing: &[HtmlUpdateDetail],
+) -> Vec<HtmlUpdateDetail> {
+    let mut emitted = HashSet::new();
+    let mut merged: Vec<HtmlUpdateDetail> = crawled
+        .iter()
+        .map(|u| {
+            emitted.insert(u.release_id);
+            fetched
+                .get(&u.release_id)
+                .cloned()
+                .or_else(|| existing_map.get(&u.release_id).cloned())
+                .unwrap_or_else(|| placeholder_detail(u))
+        })
         .collect();
 
-    let to_fetch: Vec<usize> = updates
+    for detail in existing {
+        if emitted.insert(detail.release_id) {
+            merged.push(
+                fetched
+                    .get(&detail.release_id)
+                    .cloned()
+                    .unwrap_or_else(|| detail.clone()),
+            );
+        }
+    }
+
+    merged
+}
+
+pub fn compute_fetch_plan(
+    updates: &[HtmlGameUpdate],
+    existing_map: &HashMap<u32, HtmlUpdateDetail>,
+) -> Vec<usize> {
+    updates
         .iter()
         .enumerate()
         .filter(|(_, u)| !existing_map.contains_key(&u.release_id))
         .map(|(i, _)| i)
-        .collect();
+        .collect()
+}
 
-    (existing_map, to_fetch)
+#[derive(Debug, Clone)]
+pub struct ExportOptions {
+    pub max_pages: Option<u32>,
+    pub concurrency: usize,
+    pub interval: Duration,
+    pub full: bool,
 }
 
 pub async fn fetch_all_update_details(
-    max_pages: Option<u32>,
     existing: Option<Vec<HtmlUpdateDetail>>,
-    concurrency: usize,
-    interval: Duration,
+    opts: &ExportOptions,
 ) -> Result<Vec<HtmlUpdateDetail>, AppError> {
-    let updates = Arc::new(fetch_all_updates_async(max_pages).await?);
+    let existing = dedup_details(existing.unwrap_or_default());
+    let existing_map = valid_existing(&existing);
+    let crawl_known = if opts.full {
+        HashSet::new()
+    } else {
+        existing_map.keys().copied().collect()
+    };
 
-    let (existing_map, to_fetch) =
-        compute_fetch_plan(&updates, existing.unwrap_or_default().as_slice());
+    let updates = fetch_all_updates_async(opts.max_pages, &crawl_known).await?;
+    let crawled_ids: HashSet<u32> = updates.iter().map(|u| u.release_id).collect();
 
-    let skipped = updates.len() - to_fetch.len();
+    let to_fetch_idx = compute_fetch_plan(&updates, &existing_map);
+    let skipped = updates.len() - to_fetch_idx.len();
+    let mut tasks: Vec<HtmlGameUpdate> = to_fetch_idx.iter().map(|&i| updates[i].clone()).collect();
 
-    if skipped > 0 {
+    let prescan = pending_refetch(&existing, &crawled_ids);
+    if !prescan.is_empty() {
+        info!("预扫发现 {} 条失败占位条目，直接补抓详情", prescan.len());
+    }
+    tasks.extend(prescan);
+
+    if skipped > 0 || !tasks.is_empty() {
         info!(
             "共 {} 条更新，其中 {} 条已有详情将跳过，需抓取 {} 条",
             updates.len(),
             skipped,
-            to_fetch.len()
+            tasks.len()
         );
     }
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let total_to_fetch = to_fetch.len();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(opts.concurrency));
+    let interval = opts.interval;
+    let total_to_fetch = tasks.len();
     let mut handles = Vec::with_capacity(total_to_fetch);
 
-    for (seq, idx) in to_fetch.into_iter().enumerate() {
+    for (seq, update) in tasks.into_iter().enumerate() {
         let sem = semaphore.clone();
-        let updates = updates.clone();
-        let existing_map = existing_map.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -332,7 +439,6 @@ pub async fn fetch_all_update_details(
                 tokio::time::sleep(interval).await;
             }
 
-            let update = &updates[idx];
             debug!(
                 "获取详情 {}/{}: build={}",
                 seq + 1,
@@ -340,26 +446,11 @@ pub async fn fetch_all_update_details(
                 update.build_number
             );
 
-            match fetch_and_parse_detail_async(update).await {
+            match fetch_and_parse_detail_async(&update).await {
                 Ok(detail) => (update.release_id, Ok(detail)),
                 Err(e) => {
                     warn!("获取详情失败 build={}: {}", update.build_number, e);
-                    let detail = existing_map
-                        .get(&update.release_id)
-                        .cloned()
-                        .unwrap_or(HtmlUpdateDetail {
-                            build_number: update.build_number,
-                            link: update.link.clone(),
-                            release_date: update.release_date,
-                            is_hotfix: update.is_hotfix,
-                            status: update.status,
-                            is_current: update.is_current,
-                            row_id: update.row_id,
-                            release_id: update.release_id,
-                            title: String::new(),
-                            content_text: String::new(),
-                        });
-                    (update.release_id, Err(detail))
+                    (update.release_id, Err(placeholder_detail(&update)))
                 }
             }
         }));
@@ -374,33 +465,7 @@ pub async fn fetch_all_update_details(
         .map(|(rid, r)| (rid, r.unwrap_or_else(|e| e)))
         .collect();
 
-    let details: Vec<HtmlUpdateDetail> = updates
-        .iter()
-        .map(|u| {
-            fetched_map
-                .get(&u.release_id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    existing_map
-                        .get(&u.release_id)
-                        .cloned()
-                        .unwrap_or(HtmlUpdateDetail {
-                            build_number: u.build_number,
-                            link: u.link.clone(),
-                            release_date: u.release_date,
-                            is_hotfix: u.is_hotfix,
-                            status: u.status,
-                            is_current: u.is_current,
-                            row_id: u.row_id,
-                            release_id: u.release_id,
-                            title: String::new(),
-                            content_text: String::new(),
-                        })
-                })
-        })
-        .collect();
-
-    Ok(details)
+    Ok(merge_details(&updates, &fetched_map, &existing_map, &existing))
 }
 
 pub fn fetch_latest_update(
@@ -631,8 +696,7 @@ mod tests {
             make_update(100, 1, UpdateStatus::Release),
             make_update(200, 2, UpdateStatus::Test),
         ];
-        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &[]);
-        assert!(existing_map.is_empty());
+        let to_fetch = compute_fetch_plan(&updates, &valid_existing(&[]));
         assert_eq!(to_fetch, vec![0, 1]);
     }
 
@@ -647,10 +711,7 @@ mod tests {
             make_detail(1, "some content"),
             make_detail(3, "other content"),
         ];
-        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
-        assert_eq!(existing_map.len(), 2);
-        assert!(existing_map.contains_key(&1));
-        assert!(existing_map.contains_key(&3));
+        let to_fetch = compute_fetch_plan(&updates, &valid_existing(&existing));
         assert_eq!(to_fetch, vec![1]);
     }
 
@@ -661,12 +722,8 @@ mod tests {
             make_update(200, 2, UpdateStatus::Test),
         ];
         let existing = vec![make_detail(1, "")];
-        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
-        assert!(
-            existing_map.is_empty(),
-            "Empty content_text should not be in existing_map"
-        );
-        assert_eq!(to_fetch, vec![0, 1]);
+        let to_fetch = compute_fetch_plan(&updates, &valid_existing(&existing));
+        assert_eq!(to_fetch, vec![0, 1], "空 content_text 不算有效已有条目");
     }
 
     #[test]
@@ -676,21 +733,15 @@ mod tests {
             make_update(200, 2, UpdateStatus::Test),
             make_update(300, 3, UpdateStatus::Release),
         ];
-        let existing = vec![
-            make_detail(1, "valid content"),
-            make_detail(2, ""),
-        ];
-        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
-        assert_eq!(existing_map.len(), 1);
-        assert!(existing_map.contains_key(&1));
+        let existing = vec![make_detail(1, "valid content"), make_detail(2, "")];
+        let to_fetch = compute_fetch_plan(&updates, &valid_existing(&existing));
         assert_eq!(to_fetch, vec![1, 2]);
     }
 
     #[test]
     fn test_compute_fetch_plan_no_updates() {
         let updates: Vec<HtmlGameUpdate> = vec![];
-        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &[]);
-        assert!(existing_map.is_empty());
+        let to_fetch = compute_fetch_plan(&updates, &valid_existing(&[]));
         assert!(to_fetch.is_empty());
     }
 
@@ -698,9 +749,7 @@ mod tests {
     fn test_compute_fetch_plan_existing_not_in_updates() {
         let updates = vec![make_update(100, 1, UpdateStatus::Release)];
         let existing = vec![make_detail(99, "orphan content")];
-        let (existing_map, to_fetch) = compute_fetch_plan(&updates, &existing);
-        assert_eq!(existing_map.len(), 1);
-        assert!(existing_map.contains_key(&99));
+        let to_fetch = compute_fetch_plan(&updates, &valid_existing(&existing));
         assert_eq!(to_fetch, vec![0]);
     }
 
@@ -708,7 +757,7 @@ mod tests {
     fn test_absorb_page_stops_on_empty_page() {
         let mut seen = HashSet::new();
         let mut all = Vec::new();
-        let continued = absorb_page(&mut seen, &mut all, vec![]);
+        let continued = absorb_page(&mut seen, &HashSet::new(), &mut all, vec![]);
         assert!(!continued);
         assert!(all.is_empty());
         assert!(seen.is_empty());
@@ -722,7 +771,7 @@ mod tests {
             make_update(100, 1, UpdateStatus::Release),
             make_update(200, 2, UpdateStatus::Release),
         ];
-        assert!(absorb_page(&mut seen, &mut all, page));
+        assert!(absorb_page(&mut seen, &HashSet::new(), &mut all, page));
         assert_eq!(all.len(), 2);
         assert!(seen.contains(&1) && seen.contains(&2));
     }
@@ -737,8 +786,39 @@ mod tests {
             make_update(100, 1, UpdateStatus::Release),
             make_update(200, 2, UpdateStatus::Release),
         ];
-        assert!(!absorb_page(&mut seen, &mut all, page));
+        assert!(!absorb_page(&mut seen, &HashSet::new(), &mut all, page));
         assert_eq!(all.len(), len_before);
+    }
+
+    #[test]
+    fn test_absorb_page_stops_when_all_entries_known() {
+        // 增量水位线：整页均为导出文件中已有的有效条目 → 停止翻页
+        let known = HashSet::from([1, 2]);
+        let mut seen = HashSet::new();
+        let mut all = Vec::new();
+        let page = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Release),
+        ];
+        assert!(!absorb_page(&mut seen, &known, &mut all, page));
+        assert!(all.is_empty());
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn test_absorb_page_mixed_known_and_new_continues() {
+        // 页内已知+新条目混合（新更新恰好跨页）：继续翻页，已知条目仍吸收进结果
+        let known = HashSet::from([1]);
+        let mut seen = HashSet::new();
+        let mut all = Vec::new();
+        let page = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(300, 9, UpdateStatus::Release),
+        ];
+        assert!(absorb_page(&mut seen, &known, &mut all, page));
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|u| u.release_id == 1));
+        assert!(all.iter().any(|u| u.release_id == 9));
     }
 
     #[test]
@@ -750,7 +830,7 @@ mod tests {
             make_update(100, 7, UpdateStatus::Release),
             make_update(200, 8, UpdateStatus::Release),
         ];
-        assert!(absorb_page(&mut seen, &mut all, page));
+        assert!(absorb_page(&mut seen, &HashSet::new(), &mut all, page));
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].release_id, 7);
         assert_eq!(all[1].release_id, 8);
@@ -765,8 +845,130 @@ mod tests {
             make_update(100, 1, UpdateStatus::Release),
             make_update(300, 9, UpdateStatus::Release),
         ];
-        assert!(absorb_page(&mut seen, &mut all, page));
+        assert!(absorb_page(&mut seen, &HashSet::new(), &mut all, page));
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].release_id, 9);
+    }
+
+    #[test]
+    fn test_valid_existing_filters_empty_content() {
+        let existing = vec![make_detail(1, "valid"), make_detail(2, "")];
+        let map = valid_existing(&existing);
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&1));
+    }
+
+    #[test]
+    fn test_dedup_details_keeps_first_occurrence() {
+        let details = vec![
+            make_detail(1, "first"),
+            make_detail(2, "mid"),
+            make_detail(1, "duplicate"),
+        ];
+        let deduped = dedup_details(details);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].content_text, "first");
+        assert_eq!(deduped[1].release_id, 2);
+    }
+
+    #[test]
+    fn test_pending_refetch_includes_placeholders_not_in_crawl() {
+        let existing = vec![make_detail(1, "valid"), make_detail(5, "")];
+        let crawled_ids = HashSet::from([1, 2, 3]);
+        let pending = pending_refetch(&existing, &crawled_ids);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].release_id, 5);
+        assert_eq!(pending[0].build_number, 500005);
+        assert_eq!(pending[0].link, "https://example.com/5");
+    }
+
+    #[test]
+    fn test_pending_refetch_excludes_crawled_valid_and_linkless() {
+        let mut linkless = make_detail(7, "");
+        linkless.link = String::new();
+        let existing = vec![
+            make_detail(1, "valid"),
+            make_detail(5, ""),
+            linkless,
+        ];
+        let crawled_ids = HashSet::from([5]);
+        let pending = pending_refetch(&existing, &crawled_ids);
+        assert!(pending.is_empty(), "有效条目/已在爬取区/无链接的占位均不应入列");
+    }
+
+    #[test]
+    fn test_merge_details_head_prefers_fetched_then_existing_map() {
+        let crawled = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Release),
+        ];
+        let mut fetched = HashMap::new();
+        fetched.insert(1, make_detail(1, "fresh"));
+        let existing = vec![make_detail(2, "cached")];
+        let existing_map = valid_existing(&existing);
+
+        let merged = merge_details(&crawled, &fetched, &existing_map, &existing);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].content_text, "fresh");
+        assert_eq!(merged[1].content_text, "cached");
+    }
+
+    #[test]
+    fn test_merge_details_head_builds_placeholder_for_unknown() {
+        let crawled = vec![make_update(100, 9, UpdateStatus::Release)];
+        let merged = merge_details(&crawled, &HashMap::new(), &HashMap::new(), &[]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].release_id, 9);
+        assert_eq!(merged[0].title, "");
+        assert_eq!(merged[0].content_text, "");
+    }
+
+    #[test]
+    fn test_merge_details_tail_appends_uncrawled_in_order() {
+        let crawled = vec![make_update(200, 2, UpdateStatus::Release)];
+        let existing = vec![make_detail(1, "old-1"), make_detail(3, "old-3")];
+        let existing_map = valid_existing(&existing);
+
+        let merged = merge_details(&crawled, &HashMap::new(), &existing_map, &existing);
+        let ids: Vec<u32> = merged.iter().map(|d| d.release_id).collect();
+        assert_eq!(ids, vec![2, 1, 3], "头部为爬取区，尾部按文件原序追加");
+    }
+
+    #[test]
+    fn test_merge_details_tail_substitutes_refetched_placeholder() {
+        let crawled = vec![];
+        let existing = vec![make_detail(5, "")];
+        let mut fetched = HashMap::new();
+        fetched.insert(5, make_detail(5, "refetched"));
+
+        let merged = merge_details(&crawled, &fetched, &HashMap::new(), &existing);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].content_text, "refetched");
+    }
+
+    #[test]
+    fn test_merge_details_tail_keeps_placeholder_when_refetch_failed() {
+        let crawled = vec![];
+        let existing = vec![make_detail(5, "")];
+        let mut fetched = HashMap::new();
+        fetched.insert(5, make_detail(5, ""));
+
+        let merged = merge_details(&crawled, &fetched, &HashMap::new(), &existing);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].content_text, "", "补抓失败保留空占位，等待下次预扫");
+    }
+
+    #[test]
+    fn test_merge_details_emits_overlap_once() {
+        let crawled = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Release),
+        ];
+        let existing = vec![make_detail(2, "cached-2"), make_detail(3, "old-3")];
+        let existing_map = valid_existing(&existing);
+
+        let merged = merge_details(&crawled, &HashMap::new(), &existing_map, &existing);
+        let ids: Vec<u32> = merged.iter().map(|d| d.release_id).collect();
+        assert_eq!(ids, vec![1, 2, 3], "重叠条目只在头部出现一次");
     }
 }
