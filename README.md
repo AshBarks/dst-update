@@ -98,7 +98,7 @@ dst-update rss --build-only
 
 ### export — 导出全量更新详情
 
-抓取所有更新条目的详情页，导出为 JSON 文件。支持增量更新：若目标文件已存在，将跳过已抓取的条目，仅抓取新增部分。
+抓取更新条目的详情页，导出为 JSON 文件。支持增量导出：若目标文件已存在，将跳过已抓取的条目，仅抓取新增部分——列表页翻页遇到整页均为已有条目时即停止（`--full` 可强制全量爬取）。抓取失败留下的空占位条目会在下次运行时凭已保存的链接直接补抓。
 
 ```bash
 dst-update export
@@ -109,15 +109,21 @@ dst-update export --output updates.json --pretty
 
 dst-update export --max-pages 5 --concurrency 3 --interval 500
 # 限制翻页数、并发数和请求间隔
+
+dst-update export --full
+# 忽略增量水位线，强制从头爬取所有列表页
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--output` | `dst_updates.json` | 输出文件路径 |
-| `--max-pages` | 无限制（自动翻到空页为止） | 最大抓取页数 |
+| `--max-pages` | `100` | 最大抓取页数（安全上限） |
 | `--pretty` | `false` | 格式化 JSON 输出 |
 | `--concurrency` | `5` | 并发请求数 |
 | `--interval` | `1000`（毫秒） | 并发请求之间的间隔 |
+| `--full` | `false` | 禁用增量早停，强制全量爬取 |
+
+注意：增量模式下仅新增条目会携带最新的 `is_current` 标记，已有条目的该字段保持原样。
 
 导出的 JSON 格式：
 
@@ -154,7 +160,7 @@ dst-update export --max-pages 5 --concurrency 3 --interval 500
 
 - **双数据源**：支持从 HTML 更新页面或 RSS Feed 获取数据
 - **状态过滤**：按 Test / Release 状态筛选更新
-- **增量导出**：export 命令自动检测已抓取条目，仅抓取新增更新
+- **增量导出**：export 命令自动检测已抓取条目，遇到整页均为已知条目即停止列表页爬取，仅抓取新增更新；失败占位条目自动补抓
 - **并发抓取**：可配置并发数和请求间隔，平衡速度与服务器压力
 - **自动重试**：HTTP 请求失败时指数退避重试（最多 3 次，初始 1s，最大 30s）
 - **HTML 清洗**：将富文本更新描述转为干净的纯文本
