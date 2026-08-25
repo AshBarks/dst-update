@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use log::{debug, info, warn};
 use scraper::{Html, Selector};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -152,36 +152,52 @@ pub fn latest_update(
         .max_by_key(|u| u.release_id)
 }
 
+/// 吸收一页解析结果：空页或整页均为已见条目时返回 false（应停止翻页）；
+/// 否则将其中未见的条目追加到 `all` 并登记到 `seen`，返回 true。
+fn absorb_page(
+    seen: &mut HashSet<u32>,
+    all: &mut Vec<HtmlGameUpdate>,
+    updates: Vec<HtmlGameUpdate>,
+) -> bool {
+    if updates.is_empty() || updates.iter().all(|u| seen.contains(&u.release_id)) {
+        return false;
+    }
+    all.extend(updates.into_iter().filter(|u| seen.insert(u.release_id)));
+    true
+}
+
 pub fn fetch_all_updates(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, AppError> {
     let limit = max_pages.unwrap_or(100);
     let mut all_updates = Vec::new();
+    let mut seen = HashSet::new();
 
     for page in 1..=limit {
         debug!("获取第 {} 页更新", page);
         let updates = fetch_and_parse_page(page)?;
-        if updates.is_empty() {
-            debug!("第 {} 页无更新记录，停止翻页", page);
+        if !absorb_page(&mut seen, &mut all_updates, updates) {
+            debug!("第 {} 页无新增条目，停止翻页", page);
             break;
         }
-        all_updates.extend(updates);
     }
 
     Ok(all_updates)
 }
 
-pub async fn fetch_all_updates_async(max_pages: Option<u32>) -> Result<Vec<HtmlGameUpdate>, AppError> {
+pub async fn fetch_all_updates_async(
+    max_pages: Option<u32>,
+) -> Result<Vec<HtmlGameUpdate>, AppError> {
     let limit = max_pages.unwrap_or(100);
     let mut all_updates = Vec::new();
+    let mut seen = HashSet::new();
 
     for page in 1..=limit {
         debug!("获取第 {} 页更新", page);
         let html = fetch_page_async(page).await?;
         let updates = parse_update_html(&html)?;
-        if updates.is_empty() {
-            debug!("第 {} 页无更新记录，停止翻页", page);
+        if !absorb_page(&mut seen, &mut all_updates, updates) {
+            debug!("第 {} 页无新增条目，停止翻页", page);
             break;
         }
-        all_updates.extend(updates);
     }
 
     Ok(all_updates)
@@ -686,5 +702,71 @@ mod tests {
         assert_eq!(existing_map.len(), 1);
         assert!(existing_map.contains_key(&99));
         assert_eq!(to_fetch, vec![0]);
+    }
+
+    #[test]
+    fn test_absorb_page_stops_on_empty_page() {
+        let mut seen = HashSet::new();
+        let mut all = Vec::new();
+        let continued = absorb_page(&mut seen, &mut all, vec![]);
+        assert!(!continued);
+        assert!(all.is_empty());
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn test_absorb_page_accepts_fresh_page() {
+        let mut seen = HashSet::new();
+        let mut all = Vec::new();
+        let page = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Release),
+        ];
+        assert!(absorb_page(&mut seen, &mut all, page));
+        assert_eq!(all.len(), 2);
+        assert!(seen.contains(&1) && seen.contains(&2));
+    }
+
+    #[test]
+    fn test_absorb_page_stops_when_all_entries_seen() {
+        // CMS 在真实数据耗尽后重复返回旧内容：整页均已见 → 停止且不追加
+        let mut seen = HashSet::from([1, 2]);
+        let mut all = vec![make_update(100, 1, UpdateStatus::Release)];
+        let len_before = all.len();
+        let page = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(200, 2, UpdateStatus::Release),
+        ];
+        assert!(!absorb_page(&mut seen, &mut all, page));
+        assert_eq!(all.len(), len_before);
+    }
+
+    #[test]
+    fn test_absorb_page_dedups_within_page() {
+        let mut seen = HashSet::new();
+        let mut all = Vec::new();
+        let page = vec![
+            make_update(100, 7, UpdateStatus::Release),
+            make_update(100, 7, UpdateStatus::Release),
+            make_update(200, 8, UpdateStatus::Release),
+        ];
+        assert!(absorb_page(&mut seen, &mut all, page));
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].release_id, 7);
+        assert_eq!(all[1].release_id, 8);
+    }
+
+    #[test]
+    fn test_absorb_page_partial_new_continues() {
+        // 页内新旧混合（翻页边界漂移）：继续翻页，但只吸收新条目
+        let mut seen = HashSet::from([1]);
+        let mut all = Vec::new();
+        let page = vec![
+            make_update(100, 1, UpdateStatus::Release),
+            make_update(300, 9, UpdateStatus::Release),
+        ];
+        assert!(absorb_page(&mut seen, &mut all, page));
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].release_id, 9);
     }
 }
