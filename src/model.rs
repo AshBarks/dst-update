@@ -122,7 +122,11 @@ mod tests {
 
     #[test]
     fn test_update_status_serde_roundtrip() {
-        for status in [UpdateStatus::Test, UpdateStatus::Release, UpdateStatus::Unknown] {
+        for status in [
+            UpdateStatus::Test,
+            UpdateStatus::Release,
+            UpdateStatus::Unknown,
+        ] {
             let json = serde_json::to_string(&status).unwrap();
             let deserialized: UpdateStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(status, deserialized);
@@ -209,7 +213,13 @@ mod tests {
         assert_eq!(export.total, deserialized.total);
         assert_eq!(export.fetched_at, deserialized.fetched_at);
         assert_eq!(export.updates.len(), deserialized.updates.len());
-        assert_eq!(export.updates[0].build_number, deserialized.updates[0].build_number);
-        assert_eq!(export.updates[0].content_text, deserialized.updates[0].content_text);
+        assert_eq!(
+            export.updates[0].build_number,
+            deserialized.updates[0].build_number
+        );
+        assert_eq!(
+            export.updates[0].content_text,
+            deserialized.updates[0].content_text
+        );
     }
 }

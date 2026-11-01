@@ -465,7 +465,12 @@ pub async fn fetch_all_update_details(
         .map(|(rid, r)| (rid, r.unwrap_or_else(|e| e)))
         .collect();
 
-    Ok(merge_details(&updates, &fetched_map, &existing_map, &existing))
+    Ok(merge_details(
+        &updates,
+        &fetched_map,
+        &existing_map,
+        &existing,
+    ))
 }
 
 pub fn fetch_latest_update(
@@ -618,7 +623,10 @@ mod tests {
         let (title, content) = parse_detail_html(&html).expect("Failed to parse detail HTML");
 
         assert_eq!(title, "529998 - Test Update");
-        assert!(!content.starts_with("Update Information:\n"), "Should strip prefix");
+        assert!(
+            !content.starts_with("Update Information:\n"),
+            "Should strip prefix"
+        );
         assert!(content.contains("Fixed a crash when saving"));
         assert!(content.contains("Added new feature XYZ"));
         assert!(content.contains("See the full notes for details."));
@@ -653,7 +661,11 @@ mod tests {
             </section>
         </body></html>"#;
         let (_, content) = parse_detail_html(html).unwrap();
-        assert!(content.starts_with("Hello world"), "Content should start after prefix, got: {:?}", content);
+        assert!(
+            content.starts_with("Hello world"),
+            "Content should start after prefix, got: {:?}",
+            content
+        );
     }
 
     #[test]
@@ -886,14 +898,13 @@ mod tests {
     fn test_pending_refetch_excludes_crawled_valid_and_linkless() {
         let mut linkless = make_detail(7, "");
         linkless.link = String::new();
-        let existing = vec![
-            make_detail(1, "valid"),
-            make_detail(5, ""),
-            linkless,
-        ];
+        let existing = vec![make_detail(1, "valid"), make_detail(5, ""), linkless];
         let crawled_ids = HashSet::from([5]);
         let pending = pending_refetch(&existing, &crawled_ids);
-        assert!(pending.is_empty(), "有效条目/已在爬取区/无链接的占位均不应入列");
+        assert!(
+            pending.is_empty(),
+            "有效条目/已在爬取区/无链接的占位均不应入列"
+        );
     }
 
     #[test]
@@ -955,7 +966,10 @@ mod tests {
 
         let merged = merge_details(&crawled, &fetched, &HashMap::new(), &existing);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].content_text, "", "补抓失败保留空占位，等待下次预扫");
+        assert_eq!(
+            merged[0].content_text, "",
+            "补抓失败保留空占位，等待下次预扫"
+        );
     }
 
     #[test]

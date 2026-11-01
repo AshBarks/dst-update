@@ -88,10 +88,7 @@ pub async fn async_fetch(url: &str) -> Result<String, FetchError> {
     async_fetch_with_config(url, &HttpConfig::default()).await
 }
 
-pub async fn async_fetch_with_config(
-    url: &str,
-    config: &HttpConfig,
-) -> Result<String, FetchError> {
+pub async fn async_fetch_with_config(url: &str, config: &HttpConfig) -> Result<String, FetchError> {
     let client = reqwest::Client::builder()
         .timeout(config.timeout)
         .build()
